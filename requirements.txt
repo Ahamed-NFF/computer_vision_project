@@ -1,0 +1,8 @@
+opencv-python
+mediapipe
+numpy
+google-generativeai
+python-dotenv
+Pillow
+SpeechRecognition
+PyAudio

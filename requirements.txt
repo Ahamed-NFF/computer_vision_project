@@ -1,6 +1,10 @@
-opencv-python
-mediapipe
-numpy
+# NOTE: mediapipe 0.10.21 still ships the legacy `mp.solutions` API that main.py
+# uses (mp.solutions.hands). It pins numpy<2, so opencv must match (numpy 1.26.x).
+# We use opencv-contrib-python (a superset of opencv-python that provides cv2);
+# do NOT also install opencv-python — having both corrupts the shared cv2/ folder.
+mediapipe==0.10.21
+opencv-contrib-python==4.11.0.86
+numpy==1.26.4
 google-genai
 python-dotenv
 Pillow

@@ -9,7 +9,14 @@
       "Bash(./.venv/bin/python -m pip install --quiet --upgrade pip)",
       "Bash(echo \"venv ready on $\\(./.venv/bin/python --version\\)\")",
       "Bash(./.venv/bin/python -m pip install -r requirements.txt)",
-      "Bash(./.venv/bin/python -c \"import cv2, numpy, mediapipe as mp; from mediapipe import solutions; mp.solutions.hands; print\\('OK cv2', cv2.__version__, '| numpy', numpy.__version__, '| mediapipe', mp.__version__\\)\")"
+      "Bash(./.venv/bin/python -c \"import cv2, numpy, mediapipe as mp; from mediapipe import solutions; mp.solutions.hands; print\\('OK cv2', cv2.__version__, '| numpy', numpy.__version__, '| mediapipe', mp.__version__\\)\")",
+      "Bash(.venv/bin/python -m pip install openai -q)",
+      "Bash(.venv/bin/python -c \"from image_to_text import image_to_text; print\\('import OK'\\)\")",
+      "Bash(grep -rIn -E \"gemini|Gemini|GEMINI|genai|google-genai|GOOGLE_API\" . --exclude-dir=__pycache__ --exclude-dir=.venv --exclude-dir=.git)",
+      "Bash(echo \"exit=$?\")",
+      "Bash(.venv/bin/python -c ' *)",
+      "Bash(.venv/bin/python -m py_compile main.py)",
+      "Bash(python -m py_compile main.py)"
     ]
   }
 }

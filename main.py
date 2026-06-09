@@ -1,13 +1,75 @@
 import cv2
 import mediapipe as mp
 import numpy as np
-from collections import deque
+import math
+import time
 from datetime import datetime
 import os
 from image_to_text import image_to_text
 from preprocess import preprocess_image
 import speech_recognition as sr
 import threading
+
+
+class OneEuroFilter:
+    """Adaptive low-pass filter for noisy pointing signals (Casiez et al. 2012).
+
+    A fixed smoothing factor forces a trade-off: smooth but laggy, or
+    responsive but jittery. The One Euro filter instead adapts its cutoff to
+    the signal speed. When the fingertip is nearly still it filters hard to
+    remove tracking jitter; when it moves quickly it loosens up so the cursor
+    keeps pace with the hand. This makes handwriting strokes both steady and
+    responsive, which in turn yields cleaner lines for OCR.
+    """
+
+    def __init__(self, min_cutoff=1.0, beta=0.02, d_cutoff=1.0):
+        # min_cutoff: lower = more smoothing of slow movements (less jitter).
+        # beta:       higher = less lag during fast movements.
+        self.min_cutoff = min_cutoff
+        self.beta = beta
+        self.d_cutoff = d_cutoff
+        self.x_prev = None
+        self.dx_prev = 0.0
+        self.t_prev = None
+
+    @staticmethod
+    def _alpha(cutoff, dt):
+        tau = 1.0 / (2.0 * math.pi * cutoff)
+        return 1.0 / (1.0 + tau / dt)
+
+    def reset(self):
+        """Forget history so the next sample is taken as-is (avoids a jump
+        when the hand reappears in a new spot)."""
+        self.x_prev = None
+        self.dx_prev = 0.0
+        self.t_prev = None
+
+    def filter(self, x, timestamp=None):
+        if timestamp is None:
+            timestamp = time.time()
+
+        if self.x_prev is None:
+            self.x_prev = x
+            self.t_prev = timestamp
+            return x
+
+        dt = timestamp - self.t_prev
+        if dt <= 0:
+            dt = 1e-3  # guard against duplicate/zero timestamps
+        self.t_prev = timestamp
+
+        # Filter the derivative, then use it to drive the adaptive cutoff.
+        dx = (x - self.x_prev) / dt
+        a_d = self._alpha(self.d_cutoff, dt)
+        dx_hat = a_d * dx + (1 - a_d) * self.dx_prev
+
+        cutoff = self.min_cutoff + self.beta * abs(dx_hat)
+        a = self._alpha(cutoff, dt)
+        x_hat = a * x + (1 - a) * self.x_prev
+
+        self.x_prev = x_hat
+        self.dx_prev = dx_hat
+        return x_hat
 
 class TouchlessWritingSystem:
     def __init__(self):
@@ -57,10 +119,11 @@ class TouchlessWritingSystem:
         self.current_gesture = 'idle'
         self.gesture_stability = {'gesture': 'idle', 'count': 0, 'threshold': 3}
         
-        # Cursor smoothing
-        self.position_buffer = deque(maxlen=5)  # Store last 5 positions
+        # Cursor smoothing — adaptive One Euro filter on each axis. Beats a
+        # fixed EMA: steady when the fingertip hovers, snappy when it darts.
+        self.filter_x = OneEuroFilter(min_cutoff=1.0, beta=0.02)
+        self.filter_y = OneEuroFilter(min_cutoff=1.0, beta=0.02)
         self.smoothed_position = None
-        self.smoothing_factor = 0.5  # 0 = no smoothing, 1 = max smoothing
         
         # Color selection state
         self.selection_timer = 0
@@ -104,17 +167,64 @@ class TouchlessWritingSystem:
         self.color_box_height = 50
         self.color_box_spacing = 10
         
+    @staticmethod
+    def _distance(a, b):
+        """Euclidean distance between two MediaPipe landmarks (uses z too)."""
+        return ((a.x - b.x) ** 2 + (a.y - b.y) ** 2 + (a.z - b.z) ** 2) ** 0.5
+
+    def _palm_size(self, hand_landmarks):
+        """Reference hand scale: wrist to middle-finger MCP.
+
+        Used to normalize thresholds so detection works whether the hand is
+        near or far from the camera.
+        """
+        lm = hand_landmarks.landmark
+        return self._distance(lm[0], lm[9]) + 1e-6
+
     def detect_finger_state(self, hand_landmarks, finger_tip_id, finger_pip_id):
-        """Check if a finger is extended"""
-        tip = hand_landmarks.landmark[finger_tip_id]
-        pip = hand_landmarks.landmark[finger_pip_id]
-        return tip.y < pip.y - 0.05
-    
+        """Check if a finger is extended (rotation-invariant).
+
+        A finger is extended when its tip is farther from the wrist than its
+        PIP joint AND the finger is reasonably straight. This holds in any hand
+        orientation, unlike a raw y-axis comparison which only works for an
+        upright hand. The straightness test (tip-to-MCP span vs. the summed
+        bone lengths) rejects a curled finger whose tip happens to sit far from
+        the wrist, cutting down on false "extended" readings while pointing.
+        """
+        lm = hand_landmarks.landmark
+        wrist = lm[0]
+        mcp = lm[finger_pip_id - 1]   # MCP is one joint below the PIP
+        pip = lm[finger_pip_id]
+        dip = lm[finger_tip_id - 1]   # DIP is one joint below the tip
+        tip = lm[finger_tip_id]
+
+        # Normalize the margin by hand scale so it adapts to camera distance.
+        margin = 0.05 * self._palm_size(hand_landmarks)
+        farther_than_pip = self._distance(tip, wrist) > self._distance(pip, wrist) + margin
+
+        # Straightness: a straight finger's tip-to-MCP span is close to the
+        # sum of its bone lengths; a curled one's span is much shorter.
+        bone_len = (self._distance(mcp, pip)
+                    + self._distance(pip, dip)
+                    + self._distance(dip, tip))
+        straightness = self._distance(tip, mcp) / (bone_len + 1e-6)
+
+        return farther_than_pip and straightness > 0.7
+
     def detect_thumb_state(self, hand_landmarks):
-        """Check if thumb is extended"""
-        thumb_tip = hand_landmarks.landmark[4]
-        thumb_ip = hand_landmarks.landmark[2]
-        return thumb_tip.x < thumb_ip.x - 0.05
+        """Check if the thumb is extended (rotation- and handedness-invariant).
+
+        The thumb is extended when its tip sits farther from the pinky's base
+        than its IP joint does. This avoids the brittle left/right x-axis
+        assumption of a raw coordinate comparison.
+        """
+        lm = hand_landmarks.landmark
+        pinky_mcp = lm[17]
+        thumb_tip = lm[4]
+        thumb_ip = lm[3]
+
+        margin = 0.05 * self._palm_size(hand_landmarks)
+        return self._distance(thumb_tip, pinky_mcp) > self._distance(thumb_ip, pinky_mcp) + margin
     
     def detect_gesture(self, hand_landmarks):
         """Detect hand gesture based on finger positions"""
@@ -185,29 +295,26 @@ class TouchlessWritingSystem:
         return (x, y)
     
     def smooth_position(self, new_position):
-        """Apply smoothing to cursor position for smoother movement"""
-        # Add new position to buffer
-        self.position_buffer.append(new_position)
-        
-        # If this is the first position, use it directly
-        if self.smoothed_position is None:
-            self.smoothed_position = new_position
-            return new_position
-        
-        # Calculate weighted average of buffered positions
-        if len(self.position_buffer) > 0:
-            # Use exponential moving average for smoothing
-            new_x, new_y = new_position
-            smooth_x, smooth_y = self.smoothed_position
-            
-            # Apply smoothing factor
-            smooth_x = int(smooth_x * self.smoothing_factor + new_x * (1 - self.smoothing_factor))
-            smooth_y = int(smooth_y * self.smoothing_factor + new_y * (1 - self.smoothing_factor))
-            
-            self.smoothed_position = (smooth_x, smooth_y)
-            return self.smoothed_position
-        
-        return new_position
+        """Smooth the fingertip position with a per-axis One Euro filter.
+
+        Returns a steady cursor when the finger hovers and a responsive one
+        when it moves quickly, giving cleaner handwriting strokes.
+        """
+        new_x, new_y = new_position
+        now = time.time()
+
+        smooth_x = int(round(self.filter_x.filter(new_x, now)))
+        smooth_y = int(round(self.filter_y.filter(new_y, now)))
+
+        self.smoothed_position = (smooth_x, smooth_y)
+        return self.smoothed_position
+
+    def reset_smoothing(self):
+        """Clear filter history so the cursor doesn't jump when the hand
+        reappears after being lost."""
+        self.filter_x.reset()
+        self.filter_y.reset()
+        self.smoothed_position = None
     
     def draw_color_palette(self, display_canvas):
         """Draw color selection palette with hover feedback"""
@@ -290,8 +397,8 @@ class TouchlessWritingSystem:
                 self.drawing_points = [position]
             else:
                 if self.last_position:
-                    cv2.line(self.canvas, self.last_position, position, 
-                            self.current_color, self.brush_size)
+                    cv2.line(self.canvas, self.last_position, position,
+                            self.current_color, self.brush_size, lineType=cv2.LINE_AA)
                     self.drawing_points.append(position)
                 self.last_position = position
             self.selection_timer = 0  # Reset selection timer
@@ -959,6 +1066,9 @@ class TouchlessWritingSystem:
             else:
                 self.current_gesture = 'idle'
                 self.status_message = 'No hand detected'
+                # Drop stale tracking history so the cursor resumes cleanly.
+                self.reset_smoothing()
+                self.last_position = None
             
             # Resize webcam frame for corner display
             small_frame = cv2.resize(frame, (320, 240))

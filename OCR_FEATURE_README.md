@@ -1,7 +1,7 @@
 # OCR Feature - Image to Text Conversion
 
 ## Overview
-The Touchless Writing System now includes OCR (Optical Character Recognition) functionality that can extract text from your handwritten notes using Google's Gemini AI.
+The Touchless Writing System now includes OCR (Optical Character Recognition) functionality that can extract text from your handwritten notes using OpenAI's GPT.
 
 ## How to Use
 
@@ -10,7 +10,7 @@ Press **`T`** while the application is running to convert the current page to te
 
 ### What Happens
 1. The current page/canvas is saved as a temporary image
-2. The image is sent to Google Gemini AI for text extraction
+2. The image is sent to OpenAI GPT for text extraction
 3. Extracted text is saved to a file in the `extracted_text/` folder
 4. The text is also printed to the console
 5. A status message confirms the operation
@@ -37,22 +37,22 @@ Date: 2025-10-07 14:30:22
 ## Requirements
 
 ### Dependencies
-- `google-generativeai` (Gemini AI SDK)
+- `openai` (OpenAI SDK)
 - `python-dotenv` (for API key management)
 - `Pillow` (PIL for image handling)
 
 ### API Key Setup
-You need a Google Gemini API key in your `.env` file:
+You need an OpenAI API key in your `.env` file:
 
 ```env
-GOOGLE_API_KEY=your_api_key_here
+OPENAI_API_KEY=your_api_key_here
 ```
 
-Get your API key from: https://aistudio.google.com/apikey
+Get your API key from: https://platform.openai.com/api-keys
 
 ## Features
 
-✅ **Accurate OCR** - Uses Google's advanced Gemini 2.5 Flash model  
+✅ **Accurate OCR** - Uses OpenAI's GPT-4o mini vision model  
 ✅ **Handwriting Recognition** - Can recognize handwritten text  
 ✅ **Multiple Languages** - Supports various languages  
 ✅ **Auto-Save** - Automatically saves extracted text to file  
@@ -110,4 +110,4 @@ The feature seamlessly integrates with:
 
 ---
 
-**Note:** Make sure your `.env` file contains a valid Google Gemini API key for the OCR feature to work.
+**Note:** Make sure your `.env` file contains a valid OpenAI API key for the OCR feature to work.

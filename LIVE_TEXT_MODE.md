@@ -88,7 +88,7 @@ The Live Text Mode feature allows you to instantly convert your handwritten note
 
 ### Processing Flow:
 1. Current canvas is saved to temporary file
-2. Image sent to Google Gemini AI for OCR
+2. Image sent to OpenAI GPT for OCR
 3. Text extracted and displayed in overlay
 4. Temporary file deleted automatically
 
@@ -98,8 +98,8 @@ The Live Text Mode feature allows you to instantly convert your handwritten note
 - **Memory efficient:** Only stores text, not duplicate images
 
 ### Requirements:
-- Active internet connection (for Gemini AI)
-- Google Gemini API key in `.env` file
+- Active internet connection (for OpenAI GPT)
+- OpenAI API key in `.env` file
 - Same requirements as the file-based OCR
 
 ## 🎯 Example Workflow

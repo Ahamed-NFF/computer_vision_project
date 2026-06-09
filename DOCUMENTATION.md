@@ -1,6 +1,6 @@
 # Touchless Writing System — Full Documentation
 
-An air‑writing application for the **Image Processing & Computer Vision** course. You write and draw in the air with hand gestures tracked through your webcam; the strokes are rendered onto a digital canvas. You can then convert the handwriting to text with OCR (Google Gemini), preview the text live on screen, dictate text with your voice, and save pages as images or `.txt` files.
+An air‑writing application for the **Image Processing & Computer Vision** course. You write and draw in the air with hand gestures tracked through your webcam; the strokes are rendered onto a digital canvas. You can then convert the handwriting to text with OCR (OpenAI GPT), preview the text live on screen, dictate text with your voice, and save pages as images or `.txt` files.
 
 ---
 
@@ -30,8 +30,8 @@ An air‑writing application for the **Image Processing & Computer Vision** cour
 | 🎨 8 colors + eraser | `Select` gesture | No | No |
 | 📄 Multi‑page canvas | `N` / `P` / `→` | No | No |
 | 🖼️ Save page(s) as image | `S` / `A` | No | No |
-| 🔤 OCR to text file | `T` | Yes | Yes (Gemini) |
-| 🔴 Live text overlay (on‑screen OCR) | `L` | Yes | Yes (Gemini) |
+| 🔤 OCR to text file | `T` | Yes | Yes (OpenAI) |
+| 🔴 Live text overlay (on‑screen OCR) | `L` | Yes | Yes (OpenAI) |
 | 🎤 Voice‑to‑text dictation | `V` | Yes | No (Google Speech) |
 | 🧼 OCR preprocessing toggle | `X` | No | No |
 
@@ -53,13 +53,13 @@ An air‑writing application for the **Image Processing & Computer Vision** cour
       │
       ├──► Display (OpenCV window: webcam + canvas overlay + HUD)
       │
-      └──► Save PNG ──► [preprocess.py] ──► [image_to_text.py → Gemini] ──► text
+      └──► Save PNG ──► [preprocess.py] ──► [image_to_text.py → OpenAI] ──► text
 ```
 
 - **Hand tracking:** `mediapipe.solutions.hands` (single hand, legacy Solutions API).
 - **Gesture logic:** each finger's up/down state is computed from landmark positions; the combination of raised fingers maps to a gesture ([main.py:119](main.py#L119)).
 - **Rendering:** the canvas is a plain NumPy array; strokes are drawn with OpenCV line segments between smoothed cursor positions.
-- **OCR path:** the current page is written to `temp/`, optionally cleaned by the classical pipeline in [preprocess.py](preprocess.py), then sent to Gemini in [image_to_text.py](image_to_text.py).
+- **OCR path:** the current page is written to `temp/`, optionally cleaned by the classical pipeline in [preprocess.py](preprocess.py), then sent to OpenAI in [image_to_text.py](image_to_text.py).
 
 ---
 
@@ -68,11 +68,11 @@ An air‑writing application for the **Image Processing & Computer Vision** cour
 ```
 computer_vision_project/
 ├── main.py               # The application (entry point) — TouchlessWritingSystem
-├── image_to_text.py      # Gemini OCR wrapper (image → text)
+├── image_to_text.py      # OpenAI OCR wrapper (image → text)
 ├── preprocess.py         # Classical CV preprocessing pipeline for OCR
 ├── evaluate.py           # OCR accuracy/latency evaluation harness (CER/WER)
 ├── requirements.txt      # Pinned dependencies (Python 3.11 recommended)
-├── .env                  # (you create this) GEMINI_API_KEY=...   [gitignored]
+├── .env                  # (you create this) OPENAI_API_KEY=...   [gitignored]
 ├── extracted_text/       # OCR output .txt files (auto-created)
 ├── saved_notes/          # Saved canvas images (auto-created)
 ├── temp/                 # Temp images during OCR (auto-created)
@@ -109,25 +109,25 @@ pip install -r requirements.txt
 - `mediapipe==0.10.21` — still ships the legacy `mp.solutions.hands` API the app uses; pins `numpy<2`.
 - `opencv-contrib-python==4.11.0.86` — a superset of `opencv-python` that provides `cv2`. **Do not also install `opencv-python`** — having both corrupts the shared `cv2/` folder.
 - `numpy==1.26.4` — kept `<2` for mediapipe compatibility.
-- `google-genai`, `python-dotenv`, `Pillow` — OCR (Gemini) stack.
+- `openai`, `python-dotenv`, `Pillow` — OCR (OpenAI GPT) stack.
 - `SpeechRecognition`, `PyAudio` — voice‑to‑text. On macOS, `PyAudio` builds against PortAudio; if the build fails run `brew install portaudio` first.
 
 ---
 
 ## Configuration (.env / API key)
 
-OCR features (`T` and `L`) call Google Gemini and need an API key. Drawing, voice, and image saving work **without** it.
+OCR features (`T` and `L`) call OpenAI GPT and need an API key. Drawing, voice, and image saving work **without** it.
 
-1. Get a key from https://aistudio.google.com/apikey
+1. Get a key from https://platform.openai.com/api-keys
 2. Create a `.env` file in the project root:
 
 ```env
-GEMINI_API_KEY=your_key_here
+OPENAI_API_KEY=your_key_here
 ```
 
-The Gemini client is created **lazily** ([image_to_text.py:11](image_to_text.py#L11)), so the app launches fine without a key — it only errors if you actually press `T` or `L`. `.env` is gitignored so the key is never committed.
+The OpenAI client is created **lazily** ([image_to_text.py:14](image_to_text.py#L14)), so the app launches fine without a key — it only errors if you actually press `T` or `L`. `.env` is gitignored so the key is never committed.
 
-> The `google-genai` SDK reads `GEMINI_API_KEY` (it also accepts `GOOGLE_API_KEY`). Use `GEMINI_API_KEY`.
+> The `openai` SDK reads `OPENAI_API_KEY` from the environment.
 
 ---
 
@@ -186,7 +186,7 @@ From the key handler at [main.py:986](main.py#L986):
 ## Feature Guides
 
 ### 🔤 OCR to File (`T`)
-Saves the current canvas to `temp/`, sends it to Gemini, and writes the result to `extracted_text/page_<n>_<timestamp>.txt` (with a date/header). The text is also printed to the console. See [OCR_FEATURE_README.md](OCR_FEATURE_README.md).
+Saves the current canvas to `temp/`, sends it to OpenAI, and writes the result to `extracted_text/page_<n>_<timestamp>.txt` (with a date/header). The text is also printed to the console. See [OCR_FEATURE_README.md](OCR_FEATURE_README.md).
 
 ### 🔴 Live Text Mode (`L`)
 Same OCR, but the extracted text is drawn as a **semi‑transparent overlay** on the page instead of saved to a file — useful for quick verification. Toggle with `L`; scroll long text with `↑`/`↓`. No files are created. See [LIVE_TEXT_MODE.md](LIVE_TEXT_MODE.md).
@@ -262,7 +262,7 @@ source .venv/bin/activate && pip install -r requirements.txt
 
 **Black/blank webcam window** — Grant camera permission (macOS: System Settings → Privacy & Security → Camera) to your terminal/VS Code. The app uses camera index `0` ([main.py:33](main.py#L33)); change it if you have multiple cameras.
 
-**`Gemini API key not configured`** when pressing `T`/`L` — Add `GEMINI_API_KEY` to `.env` (see [Configuration](#configuration-env--api-key)).
+**`OpenAI API key not configured`** when pressing `T`/`L` — Add `OPENAI_API_KEY` to `.env` (see [Configuration](#configuration-env--api-key)).
 
 **`cv2` import errors / segfaults** — You likely have both `opencv-python` and `opencv-contrib-python` installed. Keep only `opencv-contrib-python`:
 ```bash
@@ -284,7 +284,7 @@ pip install opencv-contrib-python==4.11.0.86
 - **OpenCV** (`opencv-contrib-python` 4.11) — capture, canvas rendering, UI
 - **MediaPipe** 0.10.21 — hand landmark tracking
 - **NumPy** 1.26 — canvas array math
-- **Google Gemini** (`google-genai`, model `gemini-2.5-flash`) — OCR
+- **OpenAI GPT** (`openai`, model `gpt-4o-mini`) — OCR
 - **SpeechRecognition + PyAudio** — voice‑to‑text (Google Speech API)
 - **python-dotenv** — API key loading · **Pillow** — image handling
 

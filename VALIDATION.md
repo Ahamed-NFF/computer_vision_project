@@ -25,7 +25,7 @@ Use the checkboxes as a sign‑off sheet before a demo or submission.
 - [ ] `pip install -r requirements.txt` completed without errors.
 - [ ] Webcam connected; OS camera permission granted to the terminal / IDE.
 - [ ] Microphone available + permission granted (for voice validation only).
-- [ ] `.env` present with a valid `GEMINI_API_KEY` (for OCR validation only).
+- [ ] `.env` present with a valid `OPENAI_API_KEY` (for OCR validation only).
 - [ ] Internet connection available (for OCR and voice validation).
 
 ---
@@ -132,7 +132,7 @@ Outputs:
 ### 6.3 Metric definitions
 - **CER** = edit distance (characters) ÷ reference character count. Lower is better; `0.0` = perfect.
 - **WER** = edit distance (words) ÷ reference word count. Lower is better.
-- **Latency** = seconds per OCR call (includes network round‑trip to Gemini).
+- **Latency** = seconds per OCR call (includes network round‑trip to OpenAI).
 
 ### 6.4 Acceptance criteria (suggested targets)
 | Metric | Target | Result | Pass |

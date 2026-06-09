@@ -32,6 +32,12 @@ Use the checkboxes as a sign‑off sheet before a demo or submission.
 
 ## 3. Environment Smoke Test
 
+> **Automated runner:** `python validate.py` performs every check in this
+> section (imports, pinned versions, opencv conflict, the preprocessing
+> self-test, and the lazy-OCR import check from §5.7) and prints a PASS/FAIL
+> sign-off. Exit code is `0` only if all automated checks pass. The manual
+> steps below remain for reference / standalone use.
+
 Confirms the critical libraries import and the pinned versions are correct **before** launching the GUI.
 
 ```bash

@@ -93,6 +93,13 @@ class TouchlessWritingSystem:
         
         # Webcam settings
         self.cap = cv2.VideoCapture(0)
+        # Validation §7.6: report a busy/missing camera instead of silently hanging.
+        if not self.cap.isOpened():
+            raise RuntimeError(
+                "Could not open the webcam (camera index 0). "
+                "Check that a camera is connected, not in use by another app, "
+                "and that camera permission is granted to the terminal / IDE."
+            )
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
         
@@ -1140,5 +1147,9 @@ class TouchlessWritingSystem:
 
 
 if __name__ == "__main__":
-    app = TouchlessWritingSystem()
-    app.run()
+    try:
+        app = TouchlessWritingSystem()
+        app.run()
+    except RuntimeError as e:
+        # e.g. webcam unavailable (Validation §7.6) — report cleanly, no traceback.
+        print(f"\n[ERROR] {e}")

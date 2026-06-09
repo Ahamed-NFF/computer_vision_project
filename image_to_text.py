@@ -38,6 +38,29 @@ def _encode_image(image_path):
     return f"data:{mime_type};base64,{encoded}"
 
 
+_OCR_PROMPT = (
+    "Transcribe the handwritten or printed text in this image exactly as written. "
+    "Output ONLY the transcribed text itself — no quotes, no labels, no explanations, "
+    "no leading phrases like 'The text is'. Preserve line breaks. "
+    "If the image contains no readable text, output nothing (an empty response)."
+)
+
+
+def _clean_ocr_output(text):
+    """Strip filler/quoting the model may add so the result is the bare transcription.
+
+    The metrics in evaluate.py and the on-canvas rendering both expect raw text,
+    not a sentence like: The text extracted from the image is: "Right".
+    """
+    if not text:
+        return ""
+    cleaned = text.strip()
+    # Drop a single pair of surrounding quotes if the whole output is quoted.
+    if len(cleaned) >= 2 and cleaned[0] in "\"'" and cleaned[-1] == cleaned[0]:
+        cleaned = cleaned[1:-1].strip()
+    return cleaned
+
+
 def image_to_text(image_path):
     data_url = _encode_image(image_path)
     response = _get_client().chat.completions.create(
@@ -46,13 +69,13 @@ def image_to_text(image_path):
             {
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": "Extract the text from the image."},
+                    {"type": "text", "text": _OCR_PROMPT},
                     {"type": "image_url", "image_url": {"url": data_url}},
                 ],
             }
         ],
     )
-    return response.choices[0].message.content
+    return _clean_ocr_output(response.choices[0].message.content)
 
 if __name__ == "__main__":
     image_path = "path_to_your_image.jpg"  # Replace with your image path

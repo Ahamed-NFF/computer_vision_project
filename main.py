@@ -102,7 +102,26 @@ class TouchlessWritingSystem:
             )
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-        
+
+        # Warm up the camera: on macOS (AVFoundation) the device reports opened
+        # before it is actually delivering frames, so the first few reads can
+        # transiently fail. Retry briefly so we don't abort on a cold start.
+        warmup_ok = False
+        for _ in range(30):
+            ok, _frame = self.cap.read()
+            if ok and _frame is not None:
+                warmup_ok = True
+                break
+            time.sleep(0.1)
+        if not warmup_ok:
+            self.cap.release()
+            raise RuntimeError(
+                "The webcam opened but never delivered a frame. "
+                "Another app may be using the camera, or camera permission "
+                "may not be granted to the terminal / IDE "
+                "(System Settings > Privacy & Security > Camera)."
+            )
+
         # Drawing settings
         self.colors = [
             ('Black', (0, 0, 0)),
@@ -1008,12 +1027,25 @@ class TouchlessWritingSystem:
         print("  Q - Quit")
         print("="*60)
         
+        consecutive_failures = 0
+        max_consecutive_failures = 30  # ~ a few seconds of dropped frames
+
         while True:
             success, frame = self.cap.read()
-            if not success:
-                print("Failed to capture frame")
-                break
-            
+            if not success or frame is None:
+                # Tolerate transient read failures (common on macOS) instead of
+                # quitting on the first one; only give up if they persist.
+                consecutive_failures += 1
+                if consecutive_failures >= max_consecutive_failures:
+                    print("Failed to capture frame from the camera. Giving up.")
+                    break
+                time.sleep(0.03)
+                # Still service the GUI so the window stays responsive / closable.
+                if (cv2.waitKey(1) & 0xFF) == ord('q'):
+                    break
+                continue
+            consecutive_failures = 0
+
             # Flip frame horizontally for mirror effect
             frame = cv2.flip(frame, 1)
             frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)

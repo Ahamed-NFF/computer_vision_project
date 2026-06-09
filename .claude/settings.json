@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls -d .venv venv)",
+      "Bash(ls -la .env)",
+      "Bash(rm -rf .venv)",
+      "Bash(/opt/homebrew/bin/python3.11 -m venv .venv)",
+      "Bash(./.venv/bin/python --version)",
+      "Bash(./.venv/bin/python -m pip install --quiet --upgrade pip)",
+      "Bash(echo \"venv ready on $\\(./.venv/bin/python --version\\)\")",
+      "Bash(./.venv/bin/python -m pip install -r requirements.txt)",
+      "Bash(./.venv/bin/python -c \"import cv2, numpy, mediapipe as mp; from mediapipe import solutions; mp.solutions.hands; print\\('OK cv2', cv2.__version__, '| numpy', numpy.__version__, '| mediapipe', mp.__version__\\)\")"
+    ]
+  }
+}

@@ -22,7 +22,8 @@
       "Bash(ls saved_notes/)",
       "Bash(mkdir -p eval_data)",
       "Bash(cp \"saved_notes/page_1_20260609_170410.png\" eval_data/sample01.png)",
-      "Bash(printf 'Rifath')"
+      "Bash(printf 'Rifath')",
+      "Bash(python3 -m py_compile main.py image_to_text.py preprocess.py validate.py evaluate.py)"
     ]
   }
 }

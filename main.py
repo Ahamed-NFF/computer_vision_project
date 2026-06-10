@@ -1,14 +1,35 @@
-import cv2
-import mediapipe as mp
-import numpy as np
-import math
-import time
-from datetime import datetime
-import os
-from image_to_text import image_to_text
-from preprocess import preprocess_image
-import speech_recognition as sr
-import threading
+"""
+main.py
+Touchless Writing System — the interactive application entry point.
+
+The program turns a webcam into a virtual whiteboard that is controlled
+entirely by hand gestures (no mouse, keyboard, or touchscreen needed for
+drawing). The high-level flow each frame is:
+
+    webcam frame -> MediaPipe hand landmarks -> finger-state / gesture detection
+    -> One Euro smoothing of the fingertip -> act on the gesture (draw / erase /
+    move / select colour / clear) -> composite the canvas + UI and display it.
+
+On top of the drawing surface it also offers:
+    * OCR — convert the handwritten canvas to text (see image_to_text.py and the
+      classical preprocessing in preprocess.py).
+    * Live text mode — overlay the OCR result on the canvas.
+    * Voice-to-text — speak and have the recognised words rendered on the page.
+
+Run with:  python main.py
+"""
+
+import cv2                                  # OpenCV: webcam capture, drawing, image I/O, GUI window
+import mediapipe as mp                      # Google MediaPipe: real-time hand-landmark detection
+import numpy as np                          # Numerical arrays — the canvas is a NumPy image
+import math                                 # Used by the One Euro filter maths
+import time                                 # Timestamps for the filter + camera warm-up delays
+from datetime import datetime               # Human-readable timestamps for saved file names
+import os                                   # Filesystem checks / directory creation for saving
+from image_to_text import image_to_text     # OCR helper (image -> transcribed text)
+from preprocess import preprocess_image      # Classical CV pipeline run before OCR
+import speech_recognition as sr             # Microphone capture + speech-to-text
+import threading                            # Run voice recognition off the main render loop
 
 
 class OneEuroFilter:
@@ -72,26 +93,36 @@ class OneEuroFilter:
         return x_hat
 
 class TouchlessWritingSystem:
+    """The whole application: owns the camera, the drawing canvas, the gesture
+    state machine, and all the modes (OCR / live text / voice).
+
+    Construction wires up MediaPipe, the webcam, the blank canvas, and every
+    piece of mutable state the main loop reads/writes. run() then drives the
+    per-frame loop until the user quits.
+    """
+
     def __init__(self):
-        # Initialize MediaPipe Hands
-        self.mp_hands = mp.solutions.hands
-        self.mp_drawing = mp.solutions.drawing_utils
-        self.mp_drawing_styles = mp.solutions.drawing_styles
-        
+        # --- MediaPipe hand tracking ---
+        self.mp_hands = mp.solutions.hands                      # the Hands solution module
+        self.mp_drawing = mp.solutions.drawing_utils            # helper to draw landmarks on a frame
+        self.mp_drawing_styles = mp.solutions.drawing_styles    # default colours/styles for that drawing
+
+        # Configure the detector: track a single hand from a live video stream.
         self.hands = self.mp_hands.Hands(
-            static_image_mode=False,
-            max_num_hands=1,
-            min_detection_confidence=0.7,
-            min_tracking_confidence=0.7,
-            model_complexity=1
+            static_image_mode=False,        # False = video mode (tracks between frames, faster)
+            max_num_hands=1,                # only one hand controls the canvas
+            min_detection_confidence=0.7,   # how sure it must be to first detect a hand
+            min_tracking_confidence=0.7,    # how sure it must be to keep tracking it
+            model_complexity=1              # 1 = more accurate landmark model (0 is faster/coarser)
         )
-        
-        # Canvas settings
+
+        # Canvas settings — the virtual page we draw on (white RGB image).
         self.canvas_width = 1280
         self.canvas_height = 720
+        # A NumPy array filled with 255 (white) is our blank page: H x W x 3 (BGR).
         self.canvas = np.ones((self.canvas_height, self.canvas_width, 3), dtype=np.uint8) * 255
-        
-        # Webcam settings
+
+        # Webcam settings — open the default camera (index 0).
         self.cap = cv2.VideoCapture(0)
         # Validation §7.6: report a busy/missing camera instead of silently hanging.
         if not self.cap.isOpened():
@@ -100,6 +131,7 @@ class TouchlessWritingSystem:
                 "Check that a camera is connected, not in use by another app, "
                 "and that camera permission is granted to the terminal / IDE."
             )
+        # Request a modest capture resolution — enough for hand tracking, cheap to process.
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 
@@ -122,7 +154,8 @@ class TouchlessWritingSystem:
                 "(System Settings > Privacy & Security > Camera)."
             )
 
-        # Drawing settings
+        # Drawing settings — selectable palette. Each entry is (name, BGR tuple);
+        # OpenCV stores colours as Blue-Green-Red, not RGB.
         self.colors = [
             ('Black', (0, 0, 0)),
             ('Red', (0, 0, 255)),
@@ -133,57 +166,59 @@ class TouchlessWritingSystem:
             ('Yellow', (0, 255, 255)),
             ('Pink', (203, 192, 255))
         ]
-        self.current_color_idx = 0
-        self.current_color = self.colors[0][1]
-        self.brush_size = 3
-        self.eraser_size = 30
-        
-        # State management
-        self.drawing_mode = False
-        self.erasing_mode = False
-        self.last_position = None
-        self.current_gesture = 'idle'
+        self.current_color_idx = 0                  # which palette entry is active
+        self.current_color = self.colors[0][1]      # its BGR value (used by the brush)
+        self.brush_size = 3                          # pen stroke thickness in pixels
+        self.eraser_size = 30                        # eraser radius in pixels
+
+        # State management — flags the gesture handler and main loop toggle.
+        self.drawing_mode = False       # True while a draw stroke is in progress
+        self.erasing_mode = False       # True while erasing
+        self.last_position = None       # previous fingertip point, so we can draw a line to the new one
+        self.current_gesture = 'idle'   # the gesture currently being acted on
+        # Debounce: a gesture must be seen 'threshold' frames in a row before we
+        # trust it, which stops the cursor flickering between modes (see stabilize_gesture).
         self.gesture_stability = {'gesture': 'idle', 'count': 0, 'threshold': 3}
         
         # Cursor smoothing — adaptive One Euro filter on each axis. Beats a
         # fixed EMA: steady when the fingertip hovers, snappy when it darts.
         self.filter_x = OneEuroFilter(min_cutoff=1.0, beta=0.02)
         self.filter_y = OneEuroFilter(min_cutoff=1.0, beta=0.02)
-        self.smoothed_position = None
-        
-        # Color selection state
-        self.selection_timer = 0
-        self.selection_threshold = 15  # Frames to hold before selecting
-        self.last_hovered_color = None
-        
-        # Multi-page support
+        self.smoothed_position = None       # last smoothed (x, y) the cursor was drawn at
+
+        # Color selection state — "hover to confirm" so a colour isn't picked by accident.
+        self.selection_timer = 0            # frames the cursor has hovered the current swatch
+        self.selection_threshold = 15       # frames to hold before the colour is committed
+        self.last_hovered_color = None      # index of the swatch currently under the cursor
+
+        # Multi-page support — each page is its own canvas; we keep a list of them.
         self.pages = [np.ones((self.canvas_height, self.canvas_width, 3), dtype=np.uint8) * 255]
-        self.current_page = 0
-        
-        # Drawing history for undo
+        self.current_page = 0               # index into self.pages of the visible page
+
+        # Drawing history (the points of the current stroke).
         self.drawing_points = []
-        
-        # UI elements
+
+        # UI elements — compute palette geometry once.
         self.setup_ui()
-        
-        # Status message
+
+        # Status message — short text shown in the status bar, auto-clears after message_timer frames.
         self.status_message = "Ready! Show hand gestures to start"
         self.message_timer = 0
-        
-        # Live text conversion mode
-        self.live_text_mode = False
-        self.extracted_text = ""
-        self.text_scroll_offset = 0
 
-        # OCR preprocessing pipeline toggle (press X to flip)
+        # Live text conversion mode — overlays the OCR result on the canvas.
+        self.live_text_mode = False
+        self.extracted_text = ""            # the OCR text being displayed
+        self.text_scroll_offset = 0         # first visible line when the text is long
+
+        # OCR preprocessing pipeline toggle (press X to flip on/off for A/B testing).
         self.use_preprocessing = True
-        
-        # Voice to text mode
-        self.voice_mode = False
-        self.is_listening = False
-        self.voice_text = ""
-        self.recognizer = sr.Recognizer()
-        self.voice_thread = None
+
+        # Voice to text mode — capture speech and render it onto the canvas.
+        self.voice_mode = False             # True when voice mode is active
+        self.is_listening = False           # True while the mic is actively recording
+        self.voice_text = ""                # most recent recognised phrase
+        self.recognizer = sr.Recognizer()   # speech_recognition engine
+        self.voice_thread = None            # background thread so recording never freezes the UI
         
     def setup_ui(self):
         """Setup UI elements like color palette"""
@@ -253,15 +288,20 @@ class TouchlessWritingSystem:
         return self._distance(thumb_tip, pinky_mcp) > self._distance(thumb_ip, pinky_mcp) + margin
     
     def detect_gesture(self, hand_landmarks):
-        """Detect hand gesture based on finger positions"""
-        # Check each finger
+        """Detect hand gesture based on finger positions.
+
+        Works out which fingers are up, then maps that combination to a command.
+        The (tip, pip) landmark id pairs below come from MediaPipe's fixed hand
+        model (e.g. index tip = 8, index PIP = 6).
+        """
+        # Check each finger's up/down state.
         is_thumb = self.detect_thumb_state(hand_landmarks)
         is_index = self.detect_finger_state(hand_landmarks, 8, 6)
         is_middle = self.detect_finger_state(hand_landmarks, 12, 10)
         is_ring = self.detect_finger_state(hand_landmarks, 16, 14)
         is_pinky = self.detect_finger_state(hand_landmarks, 20, 18)
-        
-        # Gesture detection logic
+
+        # Map each distinct finger combination to one gesture/command.
         # Index only = Move cursor
         if is_index and not is_middle and not is_ring and not is_pinky and not is_thumb:
             return 'move'
@@ -285,21 +325,35 @@ class TouchlessWritingSystem:
         return 'idle'
     
     def stabilize_gesture(self, gesture):
-        """Stabilize gesture detection to avoid flickering"""
+        """Stabilize gesture detection to avoid flickering.
+
+        Raw per-frame detection is noisy, so we only switch to a new gesture
+        once it has been observed for 'threshold' consecutive frames. Until
+        then we keep returning the previously committed gesture.
+        """
         if gesture == self.gesture_stability['gesture']:
+            # Same as last frame: build up confidence.
             self.gesture_stability['count'] += 1
         else:
+            # Different gesture: start counting this one from scratch.
             self.gesture_stability['gesture'] = gesture
             self.gesture_stability['count'] = 1
-        
+
+        # Confident enough -> accept the new gesture; otherwise hold the old one.
         if self.gesture_stability['count'] >= self.gesture_stability['threshold']:
             return gesture
-        
+
         return self.current_gesture
     
     def get_finger_position(self, hand_landmarks, frame_shape):
-        """Get index finger tip position with margin for edge detection"""
-        index_tip = hand_landmarks.landmark[8]
+        """Get index finger tip position with margin for edge detection.
+
+        MediaPipe gives normalised coordinates in [0, 1]; we rescale them to
+        canvas pixels. A negative margin zooms the mapping in slightly so the
+        user can still reach the canvas edges without moving their hand fully
+        out of the camera's view.
+        """
+        index_tip = hand_landmarks.landmark[8]   # landmark 8 = index fingertip
         h, w, _ = frame_shape
         
         # Add margin to allow detection at edges
@@ -406,10 +460,17 @@ class TouchlessWritingSystem:
         return False
     
     def handle_gesture(self, gesture, position):
-        """Handle different gestures"""
+        """Handle different gestures.
+
+        This is the action half of the gesture system: detect_gesture decides
+        *what* the hand is doing, and this method decides *what happens* on the
+        canvas/state as a result (draw a line, erase, pick a colour, etc.).
+        """
         x, y = position
-        
+
         if gesture == 'move':
+            # Pure cursor movement: no drawing, just reposition. Clear any
+            # in-progress drawing/erasing/selection state.
             self.drawing_mode = False
             self.erasing_mode = False
             self.last_position = position
@@ -418,18 +479,22 @@ class TouchlessWritingSystem:
             
         elif gesture == 'draw':
             if not self.drawing_mode:
+                # First frame of a new stroke: just record the starting point.
                 self.drawing_mode = True
                 self.last_position = position
                 self.drawing_points = [position]
             else:
+                # Continuing a stroke: connect the previous point to the new one
+                # with an anti-aliased line so the ink looks continuous.
                 if self.last_position:
                     cv2.line(self.canvas, self.last_position, position,
                             self.current_color, self.brush_size, lineType=cv2.LINE_AA)
                     self.drawing_points.append(position)
                 self.last_position = position
             self.selection_timer = 0  # Reset selection timer
-                
+
         elif gesture == 'erase':
+            # Paint a white filled circle to "rub out" whatever is under the cursor.
             self.erasing_mode = True
             self.drawing_mode = False
             cv2.circle(self.canvas, position, self.eraser_size, (255, 255, 255), -1)
@@ -443,28 +508,31 @@ class TouchlessWritingSystem:
             hovered_color_idx = self.check_color_selection(x, y)
             
             if hovered_color_idx is not None:
-                # If hovering over the same color, increment timer
+                # Hovering a swatch. If it's the same one as last frame, count
+                # up; holding long enough (selection_threshold) commits it. This
+                # "dwell to click" avoids selecting a colour just by passing over it.
                 if hovered_color_idx == self.last_hovered_color:
                     self.selection_timer += 1
-                    
-                    # Select color after holding for threshold frames
+
+                    # Held long enough -> actually switch to this colour.
                     if self.selection_timer >= self.selection_threshold:
                         self.select_color(hovered_color_idx)
                         self.selection_timer = 0  # Reset after selection
                 else:
-                    # New color being hovered, reset timer
+                    # Moved onto a different swatch: restart the dwell timer.
                     self.last_hovered_color = hovered_color_idx
                     self.selection_timer = 1
             else:
-                # Not hovering over any color, reset
+                # Cursor isn't over any swatch: cancel the pending selection.
                 self.selection_timer = 0
                 self.last_hovered_color = None
-            
+
         elif gesture == 'clear':
+            # Wipe the whole current page back to white.
             self.clear_page()
             self.selection_timer = 0  # Reset selection timer
-            
-        else:  # idle
+
+        else:  # idle — hand present but no recognised command; reset everything.
             self.drawing_mode = False
             self.erasing_mode = False
             self.selection_timer = 0  # Reset selection timer
@@ -832,24 +900,29 @@ class TouchlessWritingSystem:
             self.text_scroll_offset = min(max_scroll, self.text_scroll_offset + 1)
     
     def listen_for_voice(self):
-        """Background thread to listen for voice input"""
+        """Background thread to listen for voice input.
+
+        Runs off the main loop so recording (which blocks) never freezes the
+        rendering/gesture UI. Captures one phrase, transcribes it via Google's
+        speech API, and writes the result onto the canvas.
+        """
         try:
             with sr.Microphone() as source:
                 self.set_status("🎤 Listening... Speak now!")
                 print("\n🎤 Listening for voice input...")
-                
-                # Adjust for ambient noise
+
+                # Sample the room tone first so the recogniser can ignore background hiss.
                 self.recognizer.adjust_for_ambient_noise(source, duration=0.5)
-                
-                # Listen for audio
+
+                # Block until a phrase is captured (or the timeout fires).
                 self.is_listening = True
                 audio = self.recognizer.listen(source, timeout=10, phrase_time_limit=15)
                 self.is_listening = False
-                
+
                 self.set_status("Processing speech...")
                 print("Processing speech...")
-                
-                # Recognize speech using Google Speech Recognition
+
+                # Send the audio to Google's free speech-to-text endpoint.
                 text = self.recognizer.recognize_google(audio)
                 
                 self.voice_text = text
@@ -894,14 +967,15 @@ class TouchlessWritingSystem:
     
     def start_voice_recording(self):
         """Start voice recording in a separate thread"""
+        # Guard against starting a second recording while one is already running.
         if self.is_listening:
             self.set_status("⚠️ Already listening...")
             return
-        
+
         if self.voice_thread and self.voice_thread.is_alive():
             return
-        
-        # Start listening in background thread
+
+        # daemon=True so this thread won't block the program from exiting.
         self.voice_thread = threading.Thread(target=self.listen_for_voice)
         self.voice_thread.daemon = True
         self.voice_thread.start()
@@ -1003,7 +1077,13 @@ class TouchlessWritingSystem:
                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
     
     def run(self):
-        """Main loop"""
+        """Main loop — runs once per webcam frame until the user quits.
+
+        Each iteration: grab a frame, find the hand, decide and act on the
+        gesture, draw the canvas + UI overlays, show the window, and handle any
+        keyboard shortcut. Cleans up the camera and windows on exit.
+        """
+        # Print the gesture/keyboard cheat-sheet to the console on startup.
         print("="*60)
         print("TOUCHLESS WRITING SYSTEM")
         print("="*60)
@@ -1046,38 +1126,39 @@ class TouchlessWritingSystem:
                 continue
             consecutive_failures = 0
 
-            # Flip frame horizontally for mirror effect
+            # Flip horizontally so the webcam acts like a mirror (move right -> cursor right).
             frame = cv2.flip(frame, 1)
+            # MediaPipe expects RGB, but OpenCV captures BGR — convert before processing.
             frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            
-            # Process hand detection
+
+            # Run hand detection on this frame.
             results = self.hands.process(frame_rgb)
-            
-            # Create display canvas
+
+            # Work on a copy of the page so UI overlays don't get baked into the saved canvas.
             display_canvas = self.canvas.copy()
-            
-            # Draw UI elements
+
+            # Draw the persistent UI on top of the page copy.
             self.draw_status_bar(display_canvas)
             self.draw_color_palette(display_canvas)
             self.draw_instructions(display_canvas)
-            
-            # Process hand landmarks
+
+            # If a hand was found, run the full detect -> smooth -> act pipeline.
             if results.multi_hand_landmarks:
                 for hand_landmarks in results.multi_hand_landmarks:
-                    # Get finger position
+                    # 1. Where is the fingertip, in canvas pixels?
                     raw_position = self.get_finger_position(hand_landmarks, frame.shape)
-                    
-                    # Apply smoothing to position
+
+                    # 2. Smooth it (One Euro filter) to remove tracking jitter.
                     position = self.smooth_position(raw_position)
-                    
-                    # Detect and stabilize gesture
+
+                    # 3. What gesture is the hand making? (debounced for stability)
                     detected_gesture = self.detect_gesture(hand_landmarks)
                     self.current_gesture = self.stabilize_gesture(detected_gesture)
-                    
-                    # Handle gesture
+
+                    # 4. Act on it (draw / erase / move / select / clear).
                     self.handle_gesture(self.current_gesture, position)
-                    
-                    # Draw cursor
+
+                    # 5. Show a cursor whose shape reflects the active gesture.
                     self.draw_cursor(display_canvas, position, self.current_gesture)
                     
                     # Update status based on gesture
@@ -1094,7 +1175,8 @@ class TouchlessWritingSystem:
                         }
                         self.status_message = gesture_messages.get(self.current_gesture, 'Ready')
                     
-                    # Draw hand landmarks on webcam frame
+                    # Draw the detected skeleton onto the small webcam preview so
+                    # the user can see the tracking working.
                     self.mp_drawing.draw_landmarks(
                         frame,
                         hand_landmarks,
@@ -1103,17 +1185,19 @@ class TouchlessWritingSystem:
                         self.mp_drawing_styles.get_default_hand_connections_style()
                     )
             else:
+                # No hand this frame: go idle and forget tracking history.
                 self.current_gesture = 'idle'
                 self.status_message = 'No hand detected'
                 # Drop stale tracking history so the cursor resumes cleanly.
                 self.reset_smoothing()
                 self.last_position = None
             
-            # Resize webcam frame for corner display
+            # Shrink the webcam feed to a thumbnail for picture-in-picture display.
             small_frame = cv2.resize(frame, (320, 240))
-            
-            # Place webcam in corner
-            display_canvas[self.canvas_height - 260:self.canvas_height - 20, 
+
+            # Paste that thumbnail into the bottom-right corner of the canvas
+            # (NumPy slice assignment copies the pixels into that region).
+            display_canvas[self.canvas_height - 260:self.canvas_height - 20,
                           self.canvas_width - 340:self.canvas_width - 20] = small_frame
             
             # Draw border around webcam
@@ -1128,49 +1212,49 @@ class TouchlessWritingSystem:
             # Draw voice mode indicator
             self.draw_voice_indicator(display_canvas)
             
-            # Show the display
+            # Render the finished frame into the application window.
             cv2.imshow('Touchless Writing System', display_canvas)
-            
-            # Handle keyboard input
+
+            # Poll the keyboard for 1 ms; & 0xFF keeps only the key code byte.
             key = cv2.waitKey(1) & 0xFF
-            
-            if key == ord('q'):
+
+            if key == ord('q'):                 # Q  -> quit the app
                 break
-            elif key == ord('n'):
+            elif key == ord('n'):               # N  -> add a new blank page
                 self.new_page()
-            elif key == ord('p'):
+            elif key == ord('p'):               # P  -> go to previous page
                 self.previous_page()
-            elif key == 83:  # Right arrow
+            elif key == 83:                     # ->  (right arrow) next page
                 self.next_page()
-            elif key == 82:  # Up arrow
+            elif key == 82:                     # ^   (up arrow) scroll text up
                 self.scroll_text('up')
-            elif key == 84:  # Down arrow
+            elif key == 84:                     # v   (down arrow) scroll text down
                 self.scroll_text('down')
-            elif key == ord('s'):
+            elif key == ord('s'):               # S  -> save current page as PNG
                 self.save_image()
-            elif key == ord('a'):
+            elif key == ord('a'):               # A  -> save every page
                 self.save_all_pages()
-            elif key == ord('t'):
+            elif key == ord('t'):               # T  -> OCR the page to a text file
                 self.convert_page_to_text()
-            elif key == ord('l'):
+            elif key == ord('l'):               # L  -> toggle live text overlay
                 self.toggle_live_text_mode()
-            elif key == ord('v'):
+            elif key == ord('v'):               # V  -> enter voice mode / start recording
                 if not self.voice_mode:
                     self.toggle_voice_mode()
                 else:
                     self.start_voice_recording()
-            elif key == 27:  # ESC key
+            elif key == 27:                     # ESC -> leave voice mode
                 if self.voice_mode:
                     self.toggle_voice_mode()
-            elif key == ord('c'):
+            elif key == ord('c'):               # C  -> clear the current page
                 self.clear_page()
-            elif key == ord('x'):
+            elif key == ord('x'):               # X  -> toggle OCR preprocessing on/off
                 self.use_preprocessing = not self.use_preprocessing
                 state = "ON" if self.use_preprocessing else "OFF"
                 self.set_status(f"OCR preprocessing {state}")
                 print(f"OCR preprocessing {state}")
-        
-        # Cleanup
+
+        # Loop exited: release the camera, close windows, and free MediaPipe.
         self.cap.release()
         cv2.destroyAllWindows()
         self.hands.close()
@@ -1179,6 +1263,7 @@ class TouchlessWritingSystem:
 
 
 if __name__ == "__main__":
+    # Program entry point: build the system (opens camera + MediaPipe) then run.
     try:
         app = TouchlessWritingSystem()
         app.run()

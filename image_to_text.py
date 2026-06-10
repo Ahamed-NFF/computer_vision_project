@@ -62,7 +62,15 @@ def _clean_ocr_output(text):
 
 
 def image_to_text(image_path):
+    """OCR the image at `image_path` and return its transcribed text.
+
+    Sends the image (base64-encoded) plus a strict transcription prompt to a
+    vision-capable model, then strips any filler the model adds so the caller
+    gets the bare text. This is the OCR stage used by main.py and evaluate.py.
+    """
+    # Encode the file as a data URL the chat API can accept inline.
     data_url = _encode_image(image_path)
+    # One multimodal message: the transcription instruction + the image itself.
     response = _get_client().chat.completions.create(
         model="gpt-4o-mini",
         messages=[
@@ -75,6 +83,7 @@ def image_to_text(image_path):
             }
         ],
     )
+    # Pull the text out of the response and tidy it before returning.
     return _clean_ocr_output(response.choices[0].message.content)
 
 if __name__ == "__main__":
